@@ -4,7 +4,7 @@ use crate::index::am::pointer_to_kv;
 use crate::index::opclass::{Opfamily, Sphere};
 use algorithm::operator::{Dot, L2, Op};
 use algorithm::types::{DistanceKind, OwnedVector, VectorKind};
-use algorithm::{RelationRead, RerankMethod};
+use algorithm::{RelationReadBatch, RerankMethod};
 use half::f16;
 use std::num::NonZero;
 use vector::VectorOwned;
@@ -50,7 +50,7 @@ impl SearchBuilder for DefaultBuilder {
 
     fn build<'a>(
         self,
-        relation: impl RelationRead + 'a,
+        relation: impl RelationReadBatch + 'a,
         options: SearchOptions,
         mut fetcher: impl SearchFetcher + 'a,
     ) -> Box<dyn Iterator<Item = (f32, [u16; 3], bool)> + 'a> {
@@ -91,6 +91,7 @@ impl SearchBuilder for DefaultBuilder {
                         vector.clone(),
                         options.probes,
                         options.epsilon,
+                        options.stream_length,
                     );
                     let fetch = move |payload| {
                         let (key, _) = pointer_to_kv(payload);
@@ -108,7 +109,10 @@ impl SearchBuilder for DefaultBuilder {
                     match method {
                         RerankMethod::Index => Box::new(
                             algorithm::rerank_index::<Op<VectOwned<f32>, L2>, _>(
-                                relation, vector, results,
+                                relation,
+                                vector,
+                                results,
+                                options.stream_length,
                             )
                             .map(move |(distance, payload)| (opfamily.output(distance), payload)),
                         ),
@@ -134,6 +138,7 @@ impl SearchBuilder for DefaultBuilder {
                         vector.clone(),
                         options.probes,
                         options.epsilon,
+                        options.stream_length,
                     );
                     let fetch = move |payload| {
                         let (key, _) = pointer_to_kv(payload);
@@ -151,7 +156,10 @@ impl SearchBuilder for DefaultBuilder {
                     match method {
                         RerankMethod::Index => Box::new(
                             algorithm::rerank_index::<Op<VectOwned<f32>, Dot>, _>(
-                                relation, vector, results,
+                                relation,
+                                vector,
+                                results,
+                                options.stream_length,
                             )
                             .map(move |(distance, payload)| (opfamily.output(distance), payload)),
                         ),
@@ -177,6 +185,7 @@ impl SearchBuilder for DefaultBuilder {
                         vector.clone(),
                         options.probes,
                         options.epsilon,
+                        options.stream_length,
                     );
                     let fetch = move |payload| {
                         let (key, _) = pointer_to_kv(payload);
@@ -194,7 +203,10 @@ impl SearchBuilder for DefaultBuilder {
                     match method {
                         RerankMethod::Index => Box::new(
                             algorithm::rerank_index::<Op<VectOwned<f16>, L2>, _>(
-                                relation, vector, results,
+                                relation,
+                                vector,
+                                results,
+                                options.stream_length,
                             )
                             .map(move |(distance, payload)| (opfamily.output(distance), payload)),
                         ),
@@ -220,6 +232,7 @@ impl SearchBuilder for DefaultBuilder {
                         vector.clone(),
                         options.probes,
                         options.epsilon,
+                        options.stream_length,
                     );
                     let fetch = move |payload| {
                         let (key, _) = pointer_to_kv(payload);
@@ -237,7 +250,10 @@ impl SearchBuilder for DefaultBuilder {
                     match method {
                         RerankMethod::Index => Box::new(
                             algorithm::rerank_index::<Op<VectOwned<f16>, Dot>, _>(
-                                relation, vector, results,
+                                relation,
+                                vector,
+                                results,
+                                options.stream_length,
                             )
                             .map(move |(distance, payload)| (opfamily.output(distance), payload)),
                         ),

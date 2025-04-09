@@ -11,6 +11,8 @@ static MAX_SCAN_TUPLES: GucSetting<i32> = GucSetting::<i32>::new(-1);
 static MAXSIM_REFINE: GucSetting<i32> = GucSetting::<i32>::new(0);
 static MAXSIM_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+static STREAM_LENGTH: GucSetting<i32> = GucSetting::<i32>::new(5);
+
 static PRERERANK_FILTERING: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 pub fn init() {
@@ -78,6 +80,16 @@ pub fn init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_int_guc(
+        "vchordrq.stream_length",
+        "`stream_length` argument of vchordrq.",
+        "`stream_length` argument of vchordrq.",
+        &STREAM_LENGTH,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     unsafe {
         #[cfg(any(feature = "pg13", feature = "pg14"))]
         pgrx::pg_sys::EmitWarningsOnPlaceholders(c"vchordrq".as_ptr());
@@ -129,6 +141,10 @@ pub fn maxsim_refine() -> u32 {
 
 pub fn maxsim_threshold() -> u32 {
     MAXSIM_THRESHOLD.get() as u32
+}
+
+pub fn stream_length() -> u32 {
+    STREAM_LENGTH.get() as u32
 }
 
 pub fn prewarm_dim() -> Vec<u32> {

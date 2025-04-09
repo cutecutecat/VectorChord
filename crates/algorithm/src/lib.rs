@@ -72,6 +72,10 @@ pub trait RelationRead: Clone {
     fn read(&self, id: u32) -> Self::ReadGuard<'_>;
 }
 
+pub trait RelationReadBatch: Clone + RelationRead {
+    fn read_batch(&self, ids: Vec<u32>) -> Vec<<Self as RelationRead>::ReadGuard<'_>>;
+}
+
 pub trait RelationWrite: RelationRead {
     type WriteGuard<'a>: PageGuard + DerefMut<Target = Self::Page>
     where

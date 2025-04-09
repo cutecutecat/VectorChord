@@ -1,4 +1,4 @@
-use algorithm::{Opaque, Page, PageGuard, RelationRead, RelationWrite};
+use algorithm::{Opaque, Page, PageGuard, RelationRead, RelationReadBatch, RelationWrite};
 use std::mem::{MaybeUninit, offset_of};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -231,6 +231,10 @@ impl Drop for PostgresBufferWriteGuard {
     }
 }
 
+#[cfg(not(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16")))]
+use pgrx::pg_sys::{
+    ForkNumber, READ_STREAM_FULL, ReadStream, read_stream_begin_relation, read_stream_end,
+};
 #[derive(Debug, Clone)]
 pub struct PostgresRelation {
     raw: pgrx::pg_sys::Relation,
@@ -264,6 +268,75 @@ impl RelationRead for PostgresRelation {
             let page = NonNull::new(BufferGetPage(buf).cast()).expect("failed to get page");
             PostgresBufferReadGuard { buf, page, id }
         }
+    }
+}
+
+impl RelationReadBatch for PostgresRelation {
+    #[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16"))]
+    fn read_batch(&self, ids: Vec<u32>) -> Vec<Self::ReadGuard<'_>> {
+        ids.into_iter().map(|id| self.read(id)).collect()
+    }
+
+    #[cfg(not(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16")))]
+    fn read_batch(&self, ids: Vec<u32>) -> Vec<Self::ReadGuard<'_>> {
+        struct IteratorState<I> {
+            iter: I,
+        }
+
+        unsafe extern "C-unwind" fn callback_pg<I>(
+            _stream: *mut ReadStream,
+            callback_private_data: *mut core::ffi::c_void,
+            _per_buffer_data: *mut core::ffi::c_void,
+        ) -> pgrx::pg_sys::BlockNumber
+        where
+            I: Iterator<Item = u32> + 'static,
+        {
+            let state = callback_private_data as *mut IteratorState<I>;
+            if state.is_null() {
+                return InvalidBlockNumber;
+            }
+            let state = unsafe { &mut *state };
+            match state.iter.next() {
+                Some(value) => value,
+                None => InvalidBlockNumber,
+            }
+        }
+
+        let iter = ids.clone().into_iter();
+        let state = IteratorState { iter };
+        let cb_private_data = Box::into_raw(Box::new(state)) as *mut core::ffi::c_void;
+        let stream = unsafe {
+            read_stream_begin_relation(
+                READ_STREAM_FULL as i32,
+                core::ptr::null_mut(),
+                self.raw,
+                ForkNumber::MAIN_FORKNUM,
+                Some(callback_pg::<std::vec::IntoIter<u32>>),
+                cb_private_data,
+                0,
+            )
+        };
+
+        use pgrx::pg_sys::{
+            BUFFER_LOCK_SHARE, BufferGetPage, InvalidBlockNumber, LockBuffer,
+            read_stream_next_buffer,
+        };
+
+        let mut result = vec![];
+        for id in ids {
+            assert!(id != u32::MAX, "no such page");
+            let buf = unsafe { read_stream_next_buffer(stream, core::ptr::null_mut()) };
+            let page = unsafe {
+                LockBuffer(buf, BUFFER_LOCK_SHARE as _);
+                NonNull::new(BufferGetPage(buf).cast()).expect("failed to get page")
+            };
+            result.push(PostgresBufferReadGuard { buf, page, id });
+        }
+
+        unsafe {
+            read_stream_end(stream);
+        }
+        result
     }
 }
 

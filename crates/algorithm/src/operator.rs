@@ -124,6 +124,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct LAccess<'a, E, M, A> {
     elements: &'a [E],
     metadata: M,
@@ -240,6 +241,7 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct LTryAccess<'a, E, M, A> {
     elements: &'a [E],
     metadata: M,
@@ -276,7 +278,7 @@ impl<E0, E1, M0, M1, A: Accessor2<E0, E1, M0, M1>> TryAccessor1<E1, M1>
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockAccessor<D>([u16; 32], PhantomData<fn(D) -> D>);
 
 impl<D> Default for BlockAccessor<D> {
@@ -354,7 +356,7 @@ impl
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DistanceAccessor<V, D>(f32, PhantomData<fn(V) -> V>, PhantomData<fn(D) -> D>);
 
 impl<V, D> Default for DistanceAccessor<V, D> {
@@ -540,6 +542,7 @@ pub trait Operator: 'static + Debug + Copy {
     type Vector: Vector;
 
     type BlockAccessor: Default
+        + Clone
         + for<'a> Accessor2<
             [u8; 16],
             [u8; 16],
@@ -549,6 +552,7 @@ pub trait Operator: 'static + Debug + Copy {
         >;
 
     type DistanceAccessor: Default
+        + Clone
         + Accessor2<
             <Self::Vector as Vector>::Element,
             <Self::Vector as Vector>::Element,
@@ -558,6 +562,7 @@ pub trait Operator: 'static + Debug + Copy {
         >;
 
     type ResidualAccessor: Default
+        + Clone
         + Accessor2<
             <Self::Vector as Vector>::Element,
             <Self::Vector as Vector>::Element,
