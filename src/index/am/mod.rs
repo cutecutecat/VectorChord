@@ -305,6 +305,7 @@ pub unsafe extern "C" fn amrescan(
             max_scan_tuples: gucs::max_scan_tuples(),
             maxsim_refine: gucs::maxsim_refine(),
             maxsim_threshold: gucs::maxsim_threshold(),
+            stream_length: gucs::stream_length(),
         };
         let scanner = &mut *(*scan).opaque.cast::<Scanner>();
         let fetcher = {

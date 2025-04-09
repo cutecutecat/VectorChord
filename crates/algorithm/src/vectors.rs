@@ -1,6 +1,7 @@
 use crate::operator::*;
 use crate::tuples::*;
-use crate::{IndexPointer, Page, PageGuard, RelationRead, RelationWrite, tape};
+use crate::{IndexPointer, Page, PageGuard, RelationRead, RelationReadBatch, RelationWrite, tape};
+use std::collections::BTreeMap;
 use std::num::NonZero;
 use vector::VectorOwned;
 
@@ -27,31 +28,193 @@ pub fn read_for_h1_tuple<
     result.finish(cursor.expect("data corruption"))
 }
 
-pub fn read_for_h0_tuple<
+pub fn read_stream_for_h1_tuple<
     O: Operator,
-    A: Accessor1<<O::Vector as Vector>::Element, <O::Vector as Vector>::Metadata>,
+    A: Accessor1<<O::Vector as Vector>::Element, <O::Vector as Vector>::Metadata> + Clone,
 >(
-    index: impl RelationRead,
-    mean: IndexPointer,
-    payload: NonZero<u64>,
+    index: impl RelationReadBatch,
+    means: Vec<IndexPointer>,
     accessor: A,
-) -> Option<A::Output> {
-    let mut cursor = Err(mean);
-    let mut result = accessor;
-    while let Err(mean) = cursor.map_err(pointer_to_pair) {
-        let guard = index.read(mean.0);
-        let bytes = guard.get(mean.1)?;
-        let tuple = VectorTuple::<O::Vector>::deserialize_ref(bytes);
-        if tuple.payload().is_none() {
-            panic!("data corruption");
+) -> Vec<A::Output> {
+    let mut accessors: Vec<A> = vec![accessor; means.len()];
+    let mut collect_outputs: BTreeMap<usize, A::Output> = BTreeMap::new();
+
+    let mut means: Vec<_> = means
+        .iter()
+        .map(|ptr| Some(pointer_to_pair(*ptr)))
+        .collect();
+    loop {
+        let block_ids: Vec<_> = means
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|o| o.0))
+            .collect();
+
+        let guards = index.read_batch(block_ids);
+
+        let mut all_stream_end = true;
+        let mut processed_index = 0;
+
+        means = means
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                if let Some((_, buffer_id)) = item {
+                    let bytes = guards[processed_index]
+                        .get(*buffer_id)
+                        .expect("data corruption");
+                    processed_index += 1;
+                    let tuple = VectorTuple::<O::Vector>::deserialize_ref(bytes);
+
+                    if tuple.payload().is_some() {
+                        panic!("data corruption");
+                    }
+                    accessors[i].push(tuple.elements());
+
+                    let cursor = tuple.metadata_or_pointer();
+                    match cursor {
+                        Ok(_) => {
+                            collect_outputs.insert(
+                                i,
+                                accessors[i]
+                                    .clone()
+                                    .finish(cursor.expect("data corruption")),
+                            );
+                            None
+                        }
+                        Err(ptr) => {
+                            all_stream_end = false;
+                            Some(pointer_to_pair(ptr))
+                        }
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if all_stream_end {
+            break;
         }
-        if tuple.payload() != Some(payload) {
-            return None;
-        }
-        result.push(tuple.elements());
-        cursor = tuple.metadata_or_pointer();
     }
-    Some(result.finish(cursor.ok()?))
+
+    let mut result = vec![];
+    for i in 0..means.len() {
+        result.push(collect_outputs.get(&i).unwrap());
+    }
+    let mut result: Vec<_> = collect_outputs.into_iter().collect();
+    result.sort_by_key(|item| item.0);
+    result.into_iter().map(|(_, b)| b).collect()
+}
+
+// pub fn read_for_h0_tuple<
+//     O: Operator,
+//     A: Accessor1<<O::Vector as Vector>::Element, <O::Vector as Vector>::Metadata>,
+// >(
+//     index: impl RelationRead,
+//     mean: IndexPointer,
+//     payload: NonZero<u64>,
+//     accessor: A,
+// ) -> Option<A::Output> {
+//     let mut cursor = Err(mean);
+//     let mut result = accessor;
+//     while let Err(mean) = cursor.map_err(pointer_to_pair) {
+//         let guard = index.read(mean.0);
+//         let bytes = guard.get(mean.1)?;
+//         let tuple = VectorTuple::<O::Vector>::deserialize_ref(bytes);
+//         if tuple.payload().is_none() {
+//             panic!("data corruption");
+//         }
+//         if tuple.payload() != Some(payload) {
+//             return None;
+//         }
+//         result.push(tuple.elements());
+//         cursor = tuple.metadata_or_pointer();
+//     }
+//     Some(result.finish(cursor.ok()?))
+// }
+
+pub fn read_stream_for_h0_tuple<
+    O: Operator,
+    A: Accessor1<<O::Vector as Vector>::Element, <O::Vector as Vector>::Metadata> + Clone,
+>(
+    index: impl RelationReadBatch,
+    means: &[IndexPointer],
+    payloads: &[NonZero<u64>],
+    accessor: A,
+) -> Vec<Option<A::Output>> {
+    let mut accessors: Vec<A> = vec![accessor; means.len()];
+    let mut collect_outputs: BTreeMap<usize, Option<A::Output>> = BTreeMap::new();
+
+    let mut means: Vec<_> = means
+        .iter()
+        .map(|ptr| Some(pointer_to_pair(*ptr)))
+        .collect();
+    loop {
+        let block_ids: Vec<_> = means
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|o| o.0))
+            .collect();
+
+        let guards = index.read_batch(block_ids);
+
+        let mut all_stream_end = true;
+        let mut processed_index = 0;
+
+        means = means
+            .iter()
+            .zip(payloads)
+            .enumerate()
+            .map(|(i, (item, payload))| {
+                if let Some((_, buffer_id)) = item {
+                    let bytes = guards[processed_index]
+                        .get(*buffer_id)
+                        .expect("data corruption");
+                    processed_index += 1;
+                    let tuple = VectorTuple::<O::Vector>::deserialize_ref(bytes);
+
+                    if tuple.payload().is_none() {
+                        panic!("data corruption");
+                    }
+                    if tuple.payload() != Some(*payload) {
+                        collect_outputs.insert(i, None);
+                        return None;
+                    }
+                    accessors[i].push(tuple.elements());
+
+                    let cursor = tuple.metadata_or_pointer();
+                    match cursor {
+                        Ok(_) => {
+                            collect_outputs.insert(
+                                i,
+                                Some(
+                                    accessors[i]
+                                        .clone()
+                                        .finish(cursor.expect("data corruption")),
+                                ),
+                            );
+                            None
+                        }
+                        Err(ptr) => {
+                            all_stream_end = false;
+                            Some(pointer_to_pair(ptr))
+                        }
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if all_stream_end {
+            break;
+        }
+    }
+
+    let mut result = vec![];
+    for i in 0..means.len() {
+        result.push(collect_outputs.get(&i).unwrap());
+    }
+    let mut result: Vec<_> = collect_outputs.into_iter().collect();
+    result.sort_by_key(|item| item.0);
+    result.into_iter().map(|(_, b)| b).collect()
 }
 
 pub fn append<O: Operator>(
