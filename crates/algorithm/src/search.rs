@@ -1,7 +1,7 @@
 use crate::linked_vec::LinkedVec;
 use crate::operator::*;
 use crate::tuples::*;
-use crate::{IndexPointer, Page, RelationRead, tape, vectors};
+use crate::{IndexPointer, Page, RelationRead, RelationReadBatch, tape, vectors};
 use always_equal::AlwaysEqual;
 use distance::Distance;
 use std::cmp::Reverse;
@@ -17,10 +17,11 @@ type Result<T> = (
 );
 
 pub fn default_search<O: Operator>(
-    index: impl RelationRead,
+    index: impl RelationReadBatch,
     vector: O::Vector,
     probes: Vec<u32>,
     epsilon: f32,
+    stream_length: u32,
 ) -> Vec<Result<()>> {
     let meta_guard = index.read(0);
     let meta_bytes = meta_guard.get(1).expect("data corruption");
@@ -88,16 +89,21 @@ pub fn default_search<O: Operator>(
         let mut cache = BinaryHeap::<(Reverse<Distance>, _, _)>::new();
         let index = index.clone();
         let vector = vector.as_borrowed();
+
         std::iter::from_fn(move || {
-            while let Some((Reverse(_), AlwaysEqual(first), AlwaysEqual(mean))) =
-                pop_if(&mut heap, |(d, ..)| {
+            loop {
+                let elements = pop_n_if(&mut heap, stream_length, |(d, ..)| {
                     Some(*d) > cache.peek().map(|(d, ..)| *d)
-                })
-            {
+                });
+                if elements.is_empty() {
+                    break;
+                }
+                let firsts_stream: Vec<_> = elements.iter().map(|m| m.1.0).collect();
+                let means_stream = elements.iter().map(|m| m.2.0).collect();
                 if is_residual {
-                    let (dis_u, residual_u) = vectors::read_for_h1_tuple::<O, _>(
+                    let outputs = vectors::read_stream_for_h1_tuple::<O, _>(
                         index.clone(),
-                        mean,
+                        means_stream,
                         LAccess::new(
                             O::Vector::unpack(vector),
                             (
@@ -106,18 +112,22 @@ pub fn default_search<O: Operator>(
                             ),
                         ),
                     );
-                    cache.push((
-                        Reverse(dis_u),
-                        AlwaysEqual(first),
-                        AlwaysEqual(Some(residual_u)),
-                    ));
+                    for ((dis_u, residual_u), first) in outputs.into_iter().zip(firsts_stream) {
+                        cache.push((
+                            Reverse(dis_u),
+                            AlwaysEqual(first),
+                            AlwaysEqual(Some(residual_u)),
+                        ));
+                    }
                 } else {
-                    let dis_u = vectors::read_for_h1_tuple::<O, _>(
+                    let outputs = vectors::read_stream_for_h1_tuple::<O, _>(
                         index.clone(),
-                        mean,
+                        means_stream,
                         LAccess::new(O::Vector::unpack(vector), O::DistanceAccessor::default()),
                     );
-                    cache.push((Reverse(dis_u), AlwaysEqual(first), AlwaysEqual(None)));
+                    for (dis_u, first) in outputs.into_iter().zip(firsts_stream) {
+                        cache.push((Reverse(dis_u), AlwaysEqual(first), AlwaysEqual(None)));
+                    }
                 }
             }
             let (_, AlwaysEqual(first), AlwaysEqual(mean)) = cache.pop()?;
@@ -347,4 +357,27 @@ fn pop_if<T: Ord>(
     } else {
         None
     }
+}
+
+fn pop_n_if<T: Ord>(
+    heap: &mut BinaryHeap<T>,
+    n: u32,
+    mut predicate: impl FnMut(&mut T) -> bool,
+) -> Vec<T> {
+    use std::collections::binary_heap::PeekMut;
+    let mut vec = vec![];
+    for _ in 0..n {
+        let peek = heap.peek_mut();
+        match peek {
+            Some(mut p) => {
+                if predicate(&mut p) {
+                    vec.push(PeekMut::pop(p));
+                } else {
+                    return vec;
+                }
+            }
+            None => return vec,
+        }
+    }
+    vec
 }
