@@ -32,6 +32,7 @@ pub fn how(index: impl RelationRead) -> RerankMethod {
 pub struct Reranker<T, F> {
     heap: BinaryHeap<Result<T>>,
     cache: BinaryHeap<(Reverse<Distance>, AlwaysEqual<NonZero<u64>>)>,
+    counter: u32,
     f: F,
     stream_length: u32,
 }
@@ -42,13 +43,21 @@ impl<T, F: FnMut(&[IndexPointer], &[NonZero<u64>]) -> Vec<Option<Distance>>> Ite
     type Item = (Distance, NonZero<u64>);
 
     fn next(&mut self) -> Option<Self::Item> {
+        let init_counter = self.counter;
         loop {
+            let before_heap_len = self.heap.len();
             let elements = pop_n_if(&mut self.heap, self.stream_length, |(d, ..)| {
                 Some(*d) > self.cache.peek().map(|(d, ..)| *d)
             });
+            let after_heap_len = self.heap.len();
+            let before_counter = self.counter;
+            self.counter += elements.len() as u32;
+            let after_counter = self.counter;
+
             if elements.is_empty() {
                 break;
             }
+            let before_cache_len = self.cache.len();
             let pay_u_stream: Vec<NonZero<u64>> = elements.iter().map(|m| m.2.0).collect();
             let mean_stream: Vec<IndexPointer> = elements.iter().map(|m| m.3.0).collect();
             let dis_u_collect: Vec<Option<Distance>> = (self.f)(&mean_stream, &pay_u_stream);
@@ -57,7 +66,23 @@ impl<T, F: FnMut(&[IndexPointer], &[NonZero<u64>]) -> Vec<Option<Distance>>> Ite
                     self.cache.push((Reverse(*dis_u), AlwaysEqual(pay_u)));
                 }
             }
+            let after_cache_len = self.cache.len();
+            eprintln!(
+                "in loop: counter {}->{} heap_len {}->{} cache_len {}->{}",
+                before_counter,
+                after_counter,
+                before_heap_len,
+                after_heap_len,
+                before_cache_len,
+                after_cache_len
+            );
         }
+        eprintln!(
+            "finish loop: stream_length {} metric_count {} cache_size {}",
+            self.stream_length,
+            self.counter - init_counter,
+            self.cache.len()
+        );
         let (Reverse(dis_u), AlwaysEqual(pay_u)) = self.cache.pop()?;
         Some((dis_u, pay_u))
     }
@@ -85,6 +110,7 @@ pub fn rerank_index<O: Operator, T>(
         heap: BinaryHeap::from(results),
         cache: BinaryHeap::<(Reverse<Distance>, _)>::new(),
         stream_length,
+        counter: 0,
         f: move |mean_stream: &[IndexPointer], pay_u_stream: &[NonZero<u64>]| {
             vectors::read_stream_for_h0_tuple::<O, _>(
                 index.clone(),
@@ -109,6 +135,7 @@ pub fn rerank_heap<O: Operator, T>(
         heap: BinaryHeap::from(results),
         cache: BinaryHeap::<(Reverse<Distance>, _)>::new(),
         stream_length: 1,
+        counter: 0,
         f: move |_: &[IndexPointer], pay_u_stream: &[NonZero<u64>]| {
             let vector = O::Vector::unpack(vector.as_borrowed());
             pay_u_stream
