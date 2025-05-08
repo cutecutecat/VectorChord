@@ -1,4 +1,7 @@
 statement ok
+DROP TABLE IF EXISTS t;
+
+statement ok
 CREATE TABLE t (id integer, val vector(2)[]);
 
 statement ok

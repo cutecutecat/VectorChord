@@ -1,4 +1,7 @@
 statement ok
+DROP TABLE IF EXISTS t;
+
+statement ok
 CREATE TABLE t (val vector(3));
 
 statement ok

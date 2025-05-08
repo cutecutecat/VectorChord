@@ -1,6 +1,9 @@
 # TODO: Some tests are disabled due to unimplemented types: sparse vector and f16 vector
 
 statement ok
+DROP TABLE IF EXISTS t;
+
+statement ok
 CREATE TABLE t (val0 vector(3));
 
 statement ok

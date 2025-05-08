@@ -75,6 +75,29 @@ impl<T: Ord> Heap for FastHeap<T> {
         let first = self.peek()?;
         if predicate(first) { self.pop() } else { None }
     }
+
+    fn pop_if_until<A>(
+        &mut self,
+        predicate: impl FnOnce(&Self::Item) -> bool,
+        mut until: impl FnMut(&Self::Item) -> (bool, A),
+    ) -> Option<(Self::Item, A)> {
+        let another = loop {
+            let peek = self.peek()?;
+            let (result, another) = until(peek);
+            if !result {
+                self.pop();
+            } else {
+                break another;
+            }
+        };
+
+        let first = self.peek()?;
+        if predicate(first) {
+            self.pop().map(|peek| (peek, another))
+        } else {
+            None
+        }
+    }
 }
 
 #[test]

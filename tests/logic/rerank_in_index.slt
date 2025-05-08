@@ -14,7 +14,7 @@ statement ok
 CREATE INDEX ON t_column USING vchordrq (val vector_l2_ops)
 WITH (options = $$
 residual_quantization = false
-rerank_in_table = true
+rerank_in_table = false
 [build.internal]
 lists = []
 $$);
