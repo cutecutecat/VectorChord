@@ -1,5 +1,3 @@
-name: Publish
-
 on:
   release:
     types: [created]
@@ -168,7 +166,7 @@ jobs:
           platforms: ${{ matrix.runner == 'ubuntu-22.04' && 'linux/amd64' || 'linux/arm64' }}
           file: ./docker/binary.Dockerfile
           provenance: false
-          tags: tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
+          tags: starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
           build-args: |
             PG_VERSION=${{ matrix.version }}
             SEMVER=${{ env.SEMVER }}
@@ -187,8 +185,7 @@ jobs:
           file: ./docker/Dockerfile
           provenance: false
           tags: |
-            tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
-            ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
+            starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
           build-args: |
             PG_VERSION=${{ matrix.version }}
             SEMVER=${{ env.SEMVER }}
@@ -221,17 +218,12 @@ jobs:
       - name: Create manifest and push
         run: |
           docker manifest create \
-            tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}
+            starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }} \
+            --amend starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
+            --amend starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
+          docker manifest push starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}
           docker manifest create \
-            tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}
-          docker manifest create \
-            ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}
+            starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }} \
+            --amend starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
+            --amend starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
+          docker manifest push starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}
