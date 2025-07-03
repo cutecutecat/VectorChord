@@ -154,6 +154,86 @@ IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_vchordg_amhand
 CREATE FUNCTION vchordg_prewarm(regclass) RETURNS TEXT
 STRICT LANGUAGE c AS 'MODULE_PATHNAME', '_vchordg_prewarm_wrapper';
 
+CREATE FUNCTION vchordrq_evaluate_query_recall(
+    query text,
+    exact_search boolean default False,
+    gt_epsilon real default 1.9
+)
+RETURNS real
+LANGUAGE plpgsql
+STRICT
+AS $$
+DECLARE
+    rough tid[];
+    accu tid[];
+    match_count integer := 0;
+    gt_count integer;
+    recall real;
+    iter_ctid tid;
+    top_k integer;
+    query_probes text;
+    gt_probes text;
+
+BEGIN
+    IF NOT exact_search THEN
+        BEGIN
+            query_probes := current_setting('vchordrq.probes');
+        END;
+    END IF;
+
+    BEGIN
+        EXECUTE
+            format('SELECT array_agg(id) FROM (%s) AS result(id)', query)
+        INTO
+            rough;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error executing ANN query "%": %', query, SQLERRM;
+    END;
+
+    top_k := cardinality(rough);
+    IF top_k IS NULL OR top_k = 0 THEN
+        RAISE WARNING 'ANN query returned 0 results. Please check and run the query.';
+        RETURN 0.0;
+    END IF;
+
+    BEGIN
+        IF exact_search THEN
+            SET LOCAL vchordrq.enable_scan = off;
+        ELSE
+            IF query_probes = '' THEN
+                gt_probes := '';
+            ELSIF position(',' in query_probes) > 0 THEN
+                gt_probes := '9999,9999';
+            ELSE
+                gt_probes := '9999';
+            END IF;
+            EXECUTE format('SET LOCAL "vchordrq.probes" = %L', gt_probes);
+            EXECUTE format('SET LOCAL "vchordrq.epsilon" = %L', gt_epsilon);
+            RESET vchordrq.max_scan_tuples;
+        END IF;
+        EXECUTE
+            format('SELECT array_agg(id) FROM (%s) AS result(id)', query)
+        INTO
+            accu;
+    EXCEPTION WHEN OTHERS THEN
+         RAISE EXCEPTION 'Error executing Ground Truth query "%": %', query, SQLERRM;
+    END;
+
+    gt_count := cardinality(accu);
+    IF gt_count IS NULL OR gt_count = 0 THEN
+        RAISE WARNING 'Ground Truth query returned 0 results. Please check and run the query.';
+        RETURN 0.0;
+    END IF;
+    IF gt_count != top_k THEN
+         RAISE NOTICE 'Ground Truth query returned % results, while ANN query returned % results.', gt_count, top_k;
+    END IF;
+
+    SELECT COUNT(*) INTO match_count FROM (SELECT unnest(rough) INTERSECT SELECT unnest(accu)) AS tids;
+    recall := match_count::real / gt_count::real;
+    RETURN recall;
+END;
+$$;
+
 -- List of access methods
 
 CREATE ACCESS METHOD vchordrq TYPE INDEX HANDLER vchordrq_amhandler;
