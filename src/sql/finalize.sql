@@ -142,6 +142,9 @@ IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_vchord_vector_
 CREATE FUNCTION quantize_to_scalar8(halfvec) RETURNS scalar8
 IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_vchord_halfvec_quantize_to_scalar8_wrapper';
 
+CREATE FUNCTION vchordrq_logged_queries() RETURNS SETOF logged_query
+STRICT LANGUAGE c AS 'MODULE_PATHNAME', '_vchordrq_logged_queries_wrapper';
+
 CREATE FUNCTION vchordrq_amhandler(internal) RETURNS index_am_handler
 IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', '_vchordrq_amhandler_wrapper';
 

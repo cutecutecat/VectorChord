@@ -13,7 +13,10 @@
 // Copyright (c) 2025 TensorChord Inc.
 
 use super::{Io, SearchBuilder, SearchOptions, filter};
+use crate::bgworker::Query;
+use crate::bgworker::QueryLoggerMaster;
 use crate::index::fetcher::*;
+use crate::index::gucs::log_latest_queries;
 use crate::index::opclass::Sphere;
 use crate::index::vchordrq::algo::*;
 use crate::index::vchordrq::opclass::Opfamily;
@@ -34,6 +37,18 @@ pub struct DefaultBuilder {
     opfamily: Opfamily,
     orderbys: Vec<Option<OwnedVector>>,
     spheres: Vec<Option<Sphere<OwnedVector>>>,
+    orderby_attnos: Vec<i16>,
+    table_oid: u32,
+}
+
+impl DefaultBuilder {
+    pub fn add_attno(&mut self, attno: i16) {
+        self.orderby_attnos.push(attno);
+    }
+
+    pub fn set_table_oid(&mut self, oid: u32) {
+        self.table_oid = oid;
+    }
 }
 
 impl SearchBuilder for DefaultBuilder {
@@ -53,6 +68,8 @@ impl SearchBuilder for DefaultBuilder {
             opfamily,
             orderbys: Vec::new(),
             spheres: Vec::new(),
+            orderby_attnos: Vec::new(),
+            table_oid: u32::default(),
         }
     }
 
@@ -82,6 +99,7 @@ impl SearchBuilder for DefaultBuilder {
         R::Page: Page<Opaque = vchordrq::Opaque>,
     {
         let mut vector = None;
+
         let mut threshold = None;
         let mut recheck = false;
         for orderby_vector in self.orderbys.into_iter().flatten() {
@@ -102,6 +120,23 @@ impl SearchBuilder for DefaultBuilder {
         let Some(vector) = vector else {
             return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (f32, [u16; 3], bool)>>;
         };
+        if log_latest_queries() > 0 {
+            let mut column_attno = None;
+            for attno in self.orderby_attnos.into_iter() {
+                if column_attno.is_none() {
+                    column_attno = Some(attno);
+                } else {
+                    pgrx::error!("vector search with multiple vectors is not supported");
+                }
+            }
+            unsafe {
+                let query = Query::new(self.table_oid, column_attno, opfamily, vector.clone());
+                if let Some(q) = query {
+                    let worker = QueryLoggerMaster::new();
+                    worker.push(q);
+                }
+            }
+        }
         let make_h1_plain_prefetcher = MakeH1PlainPrefetcher { index };
         let make_h0_plain_prefetcher = MakeH0PlainPrefetcher { index };
         let make_h0_simple_prefetcher = MakeH0SimplePrefetcher { index };

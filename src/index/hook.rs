@@ -119,6 +119,7 @@ unsafe extern "C-unwind" fn rewrite_plan_state(
 }
 
 static PREV_EXECUTOR_START: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static PREV_SHMEM_STARTUP_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 #[cfg(any(
     feature = "pg13",
@@ -157,6 +158,22 @@ unsafe extern "C-unwind" fn executor_start(
     }
 }
 
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn shmem_startup() {
+    unsafe {
+        use core::mem::transmute;
+        use pgrx::pg_sys::shmem_startup_hook_type;
+        use std::sync::atomic::Ordering;
+        let value = transmute::<*mut (), shmem_startup_hook_type>(
+            PREV_SHMEM_STARTUP_HOOK.load(Ordering::Relaxed),
+        );
+        if let Some(prev_shmem_startup) = value {
+            prev_shmem_startup()
+        };
+        crate::bgworker::startup_hook();
+    }
+}
+
 pub fn init() {
     unsafe {
         use core::mem::transmute;
@@ -167,6 +184,13 @@ pub fn init() {
             ),
             Ordering::Relaxed,
         );
+        PREV_SHMEM_STARTUP_HOOK.store(
+            transmute::<Option<unsafe extern "C-unwind" fn() -> _>, *mut ()>(
+                pgrx::pg_sys::shmem_startup_hook,
+            ),
+            Ordering::Relaxed,
+        );
         pgrx::pg_sys::ExecutorStart_hook = Some(executor_start);
+        // pgrx::pg_sys::shmem_startup_hook = Some(shmem_startup);
     }
 }

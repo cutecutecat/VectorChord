@@ -36,6 +36,8 @@ pub enum PostgresIo {
     ReadStream,
 }
 
+static LOG_LATEST_QUERIES: GucSetting<i32> = GucSetting::<i32>::new(0);
+
 static VCHORDG_ENABLE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 static VCHORDG_EF_SEARCH: GucSetting<i32> = GucSetting::<i32>::new(64);
@@ -164,6 +166,16 @@ pub fn init() {
         c"`io_rerank` argument of vchordrq.",
         c"`io_rerank` argument of vchordrq.",
         &VCHORDRQ_IO_RERANK,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"vchordrq.log_latest_queries",
+        c"`log_latest_queries` argument of vchordrq.",
+        c"`log_latest_queries` argument of vchordrq.",
+        &LOG_LATEST_QUERIES,
+        0,
+        100,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -343,4 +355,8 @@ pub fn vchordrq_io_rerank() -> crate::index::vchordrq::scanners::Io {
         #[cfg(any(feature = "pg17", feature = "pg18"))]
         PostgresIo::ReadStream => Io::Stream,
     }
+}
+
+pub fn log_latest_queries() -> u32 {
+    LOG_LATEST_QUERIES.get() as u32
 }

@@ -460,11 +460,13 @@ pub unsafe extern "C-unwind" fn amrescan(
             | Opfamily::HalfvecIp
             | Opfamily::HalfvecCosine => {
                 let mut builder = DefaultBuilder::new(opfamily);
+                builder.set_table_oid((*(*scan).heapRelation).rd_id.to_u32());
                 for i in 0..(*scan).numberOfOrderBys {
                     let data = (*scan).orderByData.add(i as usize);
                     let value = (*data).sk_argument;
                     let is_null = ((*data).sk_flags & pgrx::pg_sys::SK_ISNULL as i32) != 0;
                     builder.add((*data).sk_strategy, (!is_null).then_some(value));
+                    builder.add_attno((*data).sk_attno);
                 }
                 for i in 0..(*scan).numberOfKeys {
                     let data = (*scan).keyData.add(i as usize);

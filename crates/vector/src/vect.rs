@@ -16,6 +16,7 @@ use super::{VectorBorrowed, VectorOwned};
 use distance::Distance;
 use simd::Floating;
 use std::cmp::Ordering;
+use std::fmt;
 use std::ops::RangeBounds;
 
 #[derive(Debug, Clone)]
@@ -229,5 +230,25 @@ impl<S: Floating> PartialOrd for VectBorrowed<'_, S> {
             }
         }
         Some(Ordering::Equal)
+    }
+}
+
+impl<'a, S> fmt::Display for VectBorrowed<'a, S>
+where
+    S: Floating + fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+
+        let mut first = true;
+        for elem in self.slice().iter() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "{:.2}", elem)?;
+            first = false;
+        }
+
+        write!(f, "]")
     }
 }
