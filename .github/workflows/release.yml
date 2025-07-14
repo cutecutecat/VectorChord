@@ -156,7 +156,7 @@ jobs:
           platforms: ${{ matrix.runner == 'ubuntu-22.04' && 'linux/amd64' || 'linux/arm64' }}
           file: ./docker/binary.Dockerfile
           provenance: false
-          tags: tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
+          tags: starkind/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
           build-args: |
             PG_VERSION=${{ matrix.version }}
             SEMVER=${{ env.SEMVER }}
@@ -175,76 +175,8 @@ jobs:
           file: ./docker/Dockerfile
           provenance: false
           tags: |
-            tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
-            ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
+            starkind/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-${{ env.PLATFORM }}
           build-args: |
             PG_VERSION=${{ matrix.version }}
             SEMVER=${{ env.SEMVER }}
             PGVECTOR=0.8.0
-
-  create-manifests:
-    runs-on: ubuntu-latest
-    needs: ["semver", "build", "docker"]
-    strategy:
-      matrix:
-        version: ["14", "15", "16", "17"]
-    env:
-      SEMVER: ${{ needs.semver.outputs.SEMVER }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERIO_USERNAME }}
-          password: ${{ secrets.DOCKERIO_TOKEN }}
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create manifest and push
-        run: |
-          docker manifest create \
-            tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push tensorchord/vchord-binary:pg${{ matrix.version }}-v${{ env.SEMVER }}
-          docker manifest create \
-            tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}
-          docker manifest create \
-            ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }} \
-            --amend ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-amd64 \
-            --amend ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}-arm64
-          docker manifest push ghcr.io/tensorchord/vchord-postgres:pg${{ matrix.version }}-v${{ env.SEMVER }}
-
-  pgxn:
-    runs-on: "ubuntu-latest"
-    needs: ["semver", "build"]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Upload
-        env:
-          SEMVER: ${{ needs.semver.outputs.SEMVER }}
-          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
-        run: |
-          mkdir -p ./build
-
-          sed -e "s/@DISTVERSION@/${SEMVER}/g" META.json.in > META.json
-          git archive --format zip --prefix "vchord-${SEMVER}/" --add-file META.json -o "./build/vchord--${SEMVER}.zip" HEAD
-
-          curl --fail -sS \
-            --user "tensorchord:${PGXN_PASSWORD}" \
-            -F "submit=Release It!" \
-            -F "archive=@./build/vchord--${SEMVER}.zip" \
-            -H "X-Requested-With: XMLHttpRequest" \
-            https://manager.pgxn.org/upload
