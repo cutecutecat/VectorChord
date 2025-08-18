@@ -27,6 +27,7 @@ always_equal = { path = "./crates/always_equal" }
 distance = { path = "./crates/distance" }
 k_means = { path = "./crates/k_means" }
 rabitq = { path = "./crates/rabitq" }
+send_fd = { path = "./crates/send_fd" }
 simd = { path = "./crates/simd" }
 small_iter = { path = "./crates/small_iter" }
 vchordg = { path = "./crates/vchordg" }
@@ -44,6 +45,9 @@ serde.workspace = true
 toml = "0.9.5"
 validator.workspace = true
 zerocopy.workspace = true
+bincode = "2.0.1"
+byteorder = "1.5.0"
+libc.workspace = true
 
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "macos")))'.dependencies]
 mimalloc = { version = "0.1.47", features = ["local_dynamic_tls"] }
@@ -69,6 +73,7 @@ seq-macro = "0.3.6"
 serde = { version = "1.0", features = ["derive"] }
 validator = { version = "0.20.0", features = ["derive"] }
 zerocopy = { version = "0.8.26", features = ["derive"] }
+libc = "0.2.174"
 
 [workspace.lints]
 # complexity

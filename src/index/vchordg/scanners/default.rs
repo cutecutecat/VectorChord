@@ -18,6 +18,7 @@ use crate::index::scanners::{Io, SearchBuilder};
 use crate::index::vchordg::algo::*;
 use crate::index::vchordg::opclass::Opfamily;
 use crate::index::vchordg::scanners::SearchOptions;
+use crate::index::collector::{CollectorSender, UniVec};
 use algo::accessor::{Dot, L2S};
 use algo::*;
 use distance::Distance;
@@ -78,6 +79,7 @@ impl SearchBuilder for DefaultBuilder {
         options: SearchOptions,
         _fetcher: impl Fetcher + 'b,
         bump: &'b impl Bump,
+        sender: impl CollectorSender,
     ) -> Box<dyn Iterator<Item = (f32, [u16; 3], bool)> + 'b>
     where
         R: RelationRead + RelationPrefetch + RelationReadStream,
@@ -104,6 +106,7 @@ impl SearchBuilder for DefaultBuilder {
         let Some(vector) = vector else {
             return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (f32, [u16; 3], bool)>>;
         };
+        sender.send(UniVec::G(vector.clone()));
         let make_vertex_plain_prefetcher = MakePlainPrefetcher { index };
         let make_vertex_simple_prefetcher = MakeSimplePrefetcher { index };
         let make_vertex_stream_prefetcher = MakeStreamPrefetcher {

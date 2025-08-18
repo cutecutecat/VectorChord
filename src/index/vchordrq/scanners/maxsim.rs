@@ -18,6 +18,7 @@ use crate::index::vchordrq::algo::*;
 use crate::index::vchordrq::filter::filter;
 use crate::index::vchordrq::opclass::Opfamily;
 use crate::index::vchordrq::scanners::SearchOptions;
+use crate::index::collector::CollectorSender;
 use algo::accessor::Dot;
 use algo::prefetcher::*;
 use algo::*;
@@ -71,6 +72,7 @@ impl SearchBuilder for MaxsimBuilder {
         options: SearchOptions,
         mut fetcher: impl Fetcher + 'b,
         bump: &'b impl Bump,
+        _sender: impl CollectorSender,
     ) -> Box<dyn Iterator<Item = (f32, [u16; 3], bool)> + 'b>
     where
         R: RelationRead + RelationPrefetch + RelationReadStream,

@@ -19,6 +19,7 @@ use crate::index::vchordrq::algo::*;
 use crate::index::vchordrq::filter::filter;
 use crate::index::vchordrq::opclass::Opfamily;
 use crate::index::vchordrq::scanners::SearchOptions;
+use crate::index::collector::{CollectorSender, UniVec};
 use algo::accessor::{Dot, L2S};
 use algo::prefetcher::*;
 use algo::*;
@@ -82,12 +83,14 @@ impl SearchBuilder for DefaultBuilder {
         options: SearchOptions,
         mut fetcher: impl Fetcher + 'b,
         bump: &'b impl Bump,
+        sender: impl CollectorSender,
     ) -> Box<dyn Iterator<Item = (f32, [u16; 3], bool)> + 'b>
     where
         R: RelationRead + RelationPrefetch + RelationReadStream,
         R::Page: Page<Opaque = vchordrq::Opaque>,
     {
         let mut vector = None;
+
         let mut threshold = None;
         let mut recheck = false;
         for orderby_vector in self.orderbys.into_iter().flatten() {
@@ -108,6 +111,7 @@ impl SearchBuilder for DefaultBuilder {
         let Some(vector) = vector else {
             return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (f32, [u16; 3], bool)>>;
         };
+        sender.send(UniVec::RQ(vector.clone()));
         let make_h1_plain_prefetcher = MakeH1PlainPrefetcher { index };
         let make_h0_plain_prefetcher = MakeH0PlainPrefetcher { index };
         let make_h0_simple_prefetcher = MakeH0SimplePrefetcher { index };
