@@ -12,6 +12,7 @@
 //
 // Copyright (c) 2025 TensorChord Inc.
 
+pub mod approx;
 pub mod flat;
 pub mod quick;
 pub mod rabitq;
@@ -32,7 +33,7 @@ pub struct This {
 
 pub trait KMeans {
     fn this(&mut self) -> &mut This;
-    fn assign(&mut self);
+    fn assign(&mut self) -> Vec<usize>;
     fn update(&mut self);
     fn sphericalize(&mut self) {
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -46,6 +47,7 @@ pub trait KMeans {
         });
     }
     fn finish(self: Box<Self>) -> Square;
+    fn finish_samples(self: Box<Self>) -> (Square, Square);
 }
 
 pub fn k_means(

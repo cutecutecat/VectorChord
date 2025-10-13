@@ -14,7 +14,7 @@
 
 use crate::datatype::typmod::Typmod;
 use crate::index::fetcher::*;
-use crate::index::sample::{HeapSampler, Sample, Sampler, Tuple};
+use crate::index::sample::{HeapSample, HeapSampler, Sample, Sampler, Tuple};
 use crate::index::storage::{PostgresPage, PostgresRelation};
 use crate::index::traverse::{HeapTraverser, Traverser};
 use crate::index::vchordrq::am::Reloption;
@@ -24,6 +24,7 @@ use crate::index::vchordrq::types::*;
 use index::relation::{
     Page, PageGuard, Relation, RelationRead, RelationReadTypes, RelationWrite, RelationWriteTypes,
 };
+use k_means::approx::*;
 use k_means::square::Square;
 use simd::Floating;
 use std::ffi::CStr;
@@ -233,8 +234,25 @@ pub unsafe extern "C-unwind" fn ambuild(
             };
             let sampler = unsafe { HeapSampler::new(index_relation, heap_relation, snapshot) };
             let mut sample = sampler.sample();
+            let (approximation, reduction, k_means_dim) = match internal_build.kmeans_algorithm {
+                KMeansAlgorithm::Lloyd {} => (false, false, vector_options.dims as usize),
+                KMeansAlgorithm::Reduction { dim: None } => {
+                    (true, false, vector_options.dims as usize)
+                }
+                KMeansAlgorithm::Reduction { dim: Some(d) } if d == vector_options.dims => {
+                    (true, false, vector_options.dims as usize)
+                }
+                KMeansAlgorithm::Reduction { dim: Some(d) } => (true, true, d as usize),
+            };
+            assert!(
+                k_means_dim <= vector_options.dims as usize,
+                "invalid K-means reduction dimension {} > {}",
+                k_means_dim,
+                vector_options.dims
+            );
+            pgrx::info!("start collecting samples from the table");
             let samples = 'a: {
-                let mut samples = Square::new(vector_options.dims as _);
+                let mut samples = Square::new(k_means_dim as _);
                 let Some(max_number_of_samples) = internal_build
                     .lists
                     .last()
@@ -250,7 +268,7 @@ pub unsafe extern "C-unwind" fn ambuild(
                             let vectors = unsafe { opfamily.store(datum) };
                             if let Some(vectors) = vectors {
                                 for (vector, _) in vectors {
-                                    let x = match vector {
+                                    let mut x = match vector {
                                         OwnedVector::Vecf32(x) => VectOwned::normalize(x),
                                         OwnedVector::Vecf16(x) => VectOwned::normalize(x),
                                     };
@@ -259,6 +277,9 @@ pub unsafe extern "C-unwind" fn ambuild(
                                         x.len() as u32,
                                         "invalid vector dimensions"
                                     );
+                                    if reduction {
+                                        x = rabitq::rotate::rotate(&x)[..k_means_dim].to_vec();
+                                    }
                                     samples.push_slice(x.as_slice());
                                 }
                             } else {
@@ -274,18 +295,34 @@ pub unsafe extern "C-unwind" fn ambuild(
                 samples.truncate(max_number_of_samples as usize);
                 samples
             };
+            let tree = match approximation {
+                true => {
+                    let mut sample = sampler.sample();
+                    make_internal_approximate_build(
+                        vector_options,
+                        k_means_dim,
+                        internal_build.clone(),
+                        samples,
+                        &reporter,
+                        opfamily,
+                        &mut sample,
+                    )
+                }
+                false => make_internal_build(vector_options, internal_build, samples, &reporter),
+            };
             if is_mvcc_snapshot(snapshot) {
                 unsafe {
                     pgrx::pg_sys::UnregisterSnapshot(snapshot);
                 }
             }
-            make_internal_build(vector_options, internal_build, samples, &reporter)
+            tree
         }
         VchordrqBuildSourceOptions::External(external_build) => {
             reporter.phase(BuildPhase::from_code(BuildPhaseCode::ExternalBuild));
             make_external_build(vector_options, opfamily, external_build)
         }
     };
+    pgrx::info!("the K-means structure tree is constructed");
     for structure in structures.iter_mut() {
         for centroid in structure.centroids.iter_mut() {
             *centroid = rabitq::rotate::rotate(centroid);
@@ -1288,6 +1325,143 @@ fn make_default_build(
     }]
 }
 
+fn make_internal_approximate_build(
+    vector_options: VectorOptions,
+    k_means_dim: usize,
+    internal_build: VchordrqInternalBuildOptions,
+    samples: Square,
+    reporter: &PostgresReporter,
+    opfamily: Opfamily,
+    sample: &mut HeapSample,
+) -> Vec<Structure<Normalized>> {
+    use std::iter::once;
+    let mut result = Vec::<Structure<Normalized>>::new();
+    let mut samples = Some(samples);
+    for w in internal_build.lists.iter().rev().copied().chain(once(1)) {
+        let input = if let Some(structure) = result.last() {
+            let mut input = Square::new(vector_options.dims as _);
+            for slice in structure.centroids.iter() {
+                input.push_slice(slice);
+            }
+            input
+        } else if let Some(samples) = samples.take() {
+            samples
+        } else {
+            unreachable!()
+        };
+        let num_threads = internal_build.build_threads as _;
+        let num_points = input.len();
+        let num_dims = vector_options.dims as usize;
+        let num_lists = w as usize;
+        let num_iterations = internal_build.kmeans_iterations as _;
+        if result.is_empty() {
+            let percentage = 0;
+            let default = BuildPhase::from_code(BuildPhaseCode::InternalBuild);
+            let phase =
+                BuildPhase::new(BuildPhaseCode::InternalBuild, 1 + percentage).unwrap_or(default);
+            reporter.phase(phase);
+        }
+        if num_lists > 1 {
+            pgrx::info!(
+                "clustering: starting, using {num_threads} threads, clustering {num_points} vectors of {num_dims} dimension into {num_lists} clusters, in {num_iterations} iterations"
+            );
+        }
+        let centroids = if result.last().is_none() {
+            let next_sample = || -> Option<(Vec<f32>, Vec<f32>)> {
+                let mut tuple = sample.next()?;
+                let (values, is_nulls) = tuple.build();
+                let datum = (!is_nulls[0]).then_some(values[0]);
+                if let Some(datum) = datum {
+                    let vectors = unsafe { opfamily.store(datum) };
+                    if let Some(vectors) = vectors {
+                        if let Some((vector, _)) = vectors.into_iter().next() {
+                            let x = match vector {
+                                OwnedVector::Vecf32(x) => VectOwned::normalize(x),
+                                OwnedVector::Vecf16(x) => VectOwned::normalize(x),
+                            };
+                            let y = rabitq::rotate::rotate(&x)[..k_means_dim].to_vec();
+                            return Some((x, y));
+                        }
+                        None
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            approx_kmeans(
+                k_means_dim,
+                num_dims,
+                input,
+                num_lists,
+                num_threads,
+                [7; 32],
+                internal_build.spherical_centroids,
+                num_iterations,
+                next_sample,
+            )
+        } else {
+            let mut f = k_means::k_means(num_dims, input, num_lists, num_threads, [7; 32]);
+            if internal_build.spherical_centroids {
+                f.sphericalize();
+            }
+            for i in 0..num_iterations {
+                pgrx::check_for_interrupts!();
+                if result.is_empty() {
+                    let percentage =
+                        ((i as f64 / num_iterations as f64) * 100.0).clamp(0.0, 100.0) as u16;
+                    let default = BuildPhase::from_code(BuildPhaseCode::InternalBuild);
+                    let phase = BuildPhase::new(BuildPhaseCode::InternalBuild, 1 + percentage)
+                        .unwrap_or(default);
+                    reporter.phase(phase);
+                }
+                if num_lists > 1 {
+                    pgrx::info!("clustering: iteration {}", i + 1);
+                }
+                f.assign();
+                f.update();
+                if internal_build.spherical_centroids {
+                    f.sphericalize();
+                }
+            }
+            f.finish()
+        };
+        if result.is_empty() {
+            let percentage = 100;
+            let default = BuildPhase::from_code(BuildPhaseCode::InternalBuild);
+            let phase =
+                BuildPhase::new(BuildPhaseCode::InternalBuild, 1 + percentage).unwrap_or(default);
+            reporter.phase(phase);
+        }
+        if num_lists > 1 {
+            pgrx::info!("clustering: finished");
+        }
+        if let Some(structure) = result.last() {
+            let mut children = vec![Vec::new(); centroids.len()];
+            for i in 0..structure.len() as u32 {
+                let target = k_means_lookup(&structure.centroids[i as usize], &centroids);
+                children[target].push(i);
+            }
+            let (centroids, children) = std::iter::zip(&centroids, children)
+                .filter(|(_, children)| !children.is_empty())
+                .map(|(centroids, children)| (centroids.to_vec(), children))
+                .unzip::<_, _, Vec<_>, Vec<_>>();
+            result.push(Structure {
+                centroids,
+                children,
+            });
+        } else {
+            let children = vec![Vec::new(); centroids.len()];
+            result.push(Structure {
+                centroids: centroids.into_iter().map(|x| x.to_vec()).collect(),
+                children,
+            });
+        }
+    }
+    result
+}
+
 fn make_internal_build(
     vector_options: VectorOptions,
     internal_build: VchordrqInternalBuildOptions,
@@ -1363,17 +1537,6 @@ fn make_internal_build(
         if let Some(structure) = result.last() {
             let mut children = vec![Vec::new(); centroids.len()];
             for i in 0..structure.len() as u32 {
-                pub fn k_means_lookup(vector: &[f32], centroids: &Square) -> usize {
-                    assert_ne!(centroids.len(), 0);
-                    let mut result = (f32::INFINITY, 0);
-                    for i in 0..centroids.len() {
-                        let dis = f32::reduce_sum_of_d2(vector, &centroids[i]);
-                        if dis <= result.0 {
-                            result = (dis, i);
-                        }
-                    }
-                    result.1
-                }
                 let target = k_means_lookup(&structure.centroids[i as usize], &centroids);
                 children[target].push(i);
             }
