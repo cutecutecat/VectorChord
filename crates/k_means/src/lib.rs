@@ -19,6 +19,8 @@ use rand::{Rng, SeedableRng};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use simd::Floating;
 
+pub mod reduction;
+
 pub fn k_means(
     num_threads: usize,
     mut check: impl FnMut(usize),

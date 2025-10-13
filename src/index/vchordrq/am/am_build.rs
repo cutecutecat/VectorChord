@@ -22,9 +22,11 @@ use crate::index::vchordrq::types::*;
 use index::relation::{
     Page, PageGuard, Relation, RelationRead, RelationReadTypes, RelationWrite, RelationWriteTypes,
 };
+use k_means::reduction::KMeansReduction;
 use pgrx::pg_sys::{Datum, ItemPointerData};
 use rand::Rng;
 use simd::Floating;
+use std::collections::BinaryHeap;
 use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::num::NonZero;
@@ -300,6 +302,13 @@ pub unsafe extern "C-unwind" fn ambuild(
         VchordrqBuildSourceOptions::Internal(internal_build) => {
             reporter.phase(BuildPhase::from_code(BuildPhaseCode::InternalBuild));
             let mut tuples_total = 0_u64;
+            let approximation = internal_build.approximate;
+            let (reduction, k_means_dim) =
+                match (approximation, internal_build.approximate_reduction_dim) {
+                    (true, 0) => (None, vector_options.dims),
+                    (true, d) => (Some(KMeansReduction::new(vector_options.dims, d)), d),
+                    (false, _) => (None, vector_options.dims),
+                };
             let samples = 'a: {
                 let mut rand = rand::rng();
                 let Some(max_number_of_samples) = internal_build
@@ -311,9 +320,10 @@ pub unsafe extern "C-unwind" fn ambuild(
                 };
                 let mut samples = Vec::new();
                 let mut number_of_samples = 0_u32;
+                pgrx::info!("Start collecting samples from the table");
                 heap.traverse(false, |(_, store)| {
                     for (vector, _) in store {
-                        let x = match vector {
+                        let mut x = match vector {
                             OwnedVector::Vecf32(x) => VectOwned::normalize(x),
                             OwnedVector::Vecf16(x) => VectOwned::normalize(x),
                         };
@@ -322,6 +332,10 @@ pub unsafe extern "C-unwind" fn ambuild(
                             x.len() as u32,
                             "invalid vector dimensions"
                         );
+                        if let Some(r) = &reduction {
+                            // TODO: validate whether this is slow
+                            x = r.project_vector(x);
+                        }
                         if number_of_samples < max_number_of_samples {
                             samples.push(x);
                             number_of_samples += 1;
@@ -335,7 +349,41 @@ pub unsafe extern "C-unwind" fn ambuild(
                 samples
             };
             reporter.tuples_total(tuples_total);
-            make_internal_build(vector_options, internal_build, samples, &reporter)
+            pgrx::info!(
+                "Collected {} samples from the table for building the index.",
+                samples.len()
+            );
+            match approximation {
+                true => {
+                    let tree = make_internal_approximate_build(
+                        VectorOptions {
+                            dims: k_means_dim,
+                            ..vector_options
+                        },
+                        internal_build,
+                        samples,
+                        &reporter,
+                    );
+                    if let Some(r) = &reduction {
+                        tree.into_iter()
+                            .map(
+                                |Structure {
+                                     centroids,
+                                     children,
+                                 }| {
+                                    Structure {
+                                        centroids: r.recover_centroids(centroids),
+                                        children,
+                                    }
+                                },
+                            )
+                            .collect()
+                    } else {
+                        tree
+                    }
+                }
+                false => make_internal_build(vector_options, internal_build, samples, &reporter),
+            }
         }
         VchordrqBuildSourceOptions::External(external_build) => {
             reporter.phase(BuildPhase::from_code(BuildPhaseCode::ExternalBuild));
@@ -1322,6 +1370,201 @@ fn make_default_build(
         centroids: vec![vec![0.0f32; vector_options.dims as usize]],
         children: vec![vec![]],
     }]
+}
+
+#[derive(Debug, PartialEq)]
+struct PriorityItem {
+    index: usize,
+    priority: f64,
+}
+
+impl Eq for PriorityItem {}
+
+impl PartialOrd for PriorityItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PriorityItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.priority.is_nan() {
+            std::cmp::Ordering::Less
+        } else if other.priority.is_nan() {
+            std::cmp::Ordering::Greater
+        } else {
+            match self.priority.partial_cmp(&other.priority) {
+                Some(ordering) => ordering,
+                None => std::cmp::Ordering::Equal,
+            }
+        }
+    }
+}
+
+fn make_internal_approximate_build(
+    vector_options: VectorOptions,
+    internal_build: VchordrqInternalBuildOptions,
+    samples: Vec<Vec<f32>>,
+    reporter: &PostgresReporter,
+) -> Vec<Structure<Vec<f32>>> {
+    let mut result = Vec::<Structure<Vec<f32>>>::new();
+    let (top_list, bottom_list, drop_top) = if internal_build.lists.len() == 1 {
+        let top_k = (internal_build.lists[0] as f64).sqrt().floor() as u32;
+        let top_k = top_k.clamp(1, (samples.len() as f64).sqrt().floor() as u32);
+        (top_k, internal_build.lists[0], true)
+    } else {
+        (internal_build.lists[0], internal_build.lists[1], false)
+    };
+    pgrx::info!(
+        "approximation: building a two-level index with {} top-level clusters and {} bottom-level clusters.",
+        top_list,
+        bottom_list
+    );
+    let k_means_report = |i: u32| {
+        let percentage = ((i + 1) as f64 / (top_list + 1) as f64 * 100.0).clamp(0.0, 100.0) as u16;
+        let default = BuildPhase::from_code(BuildPhaseCode::InternalBuild);
+        let phase =
+            BuildPhase::new(BuildPhaseCode::InternalBuild, 1 + percentage).unwrap_or(default);
+        reporter.phase(phase);
+    };
+    pgrx::info!("top clustering: started");
+    let mid_centroids = k_means::k_means(
+        internal_build.build_threads as _,
+        |i| {
+            pgrx::check_for_interrupts!();
+            pgrx::info!("top clustering: iteration {}", i + 1);
+        },
+        top_list as usize,
+        vector_options.dims as _,
+        &samples,
+        internal_build.spherical_centroids,
+        internal_build.kmeans_iterations as _,
+    );
+    pgrx::info!("top clustering: finished");
+    k_means_report(0);
+    pub fn k_means_lookup(vector: &[f32], centroids: &[Vec<f32>]) -> usize {
+        assert_ne!(centroids.len(), 0);
+        let mut result = (f32::INFINITY, 0);
+        for i in 0..centroids.len() {
+            let dis = f32::reduce_sum_of_d2(vector, &centroids[i]);
+            if dis <= result.0 {
+                result = (dis, i);
+            }
+        }
+        result.1
+    }
+    let alloc: Vec<Vec<usize>> = samples.iter().enumerate().fold(
+        vec![vec![]; mid_centroids.len()],
+        |mut acc, (i, sample)| {
+            let target = k_means_lookup(sample, &mid_centroids);
+            acc[target].push(i);
+            acc
+        },
+    );
+    let alloc_size = alloc.iter().map(|x| x.len() as u32).collect::<Vec<_>>();
+    let (mid_centroids, alloc, alloc_size): (Vec<_>, Vec<_>, Vec<_>) = mid_centroids
+        .iter()
+        .zip(alloc)
+        .zip(alloc_size)
+        .filter(|((_, _), x)| *x > 0)
+        .map(|((c, a), s)| (c.clone(), a.clone(), s))
+        .collect();
+    // sainte lague method
+    let mut alloc_lists = vec![1u32; mid_centroids.len()];
+    let mut diff = bottom_list as i32 - alloc_size.len() as i32;
+    if diff < 0 {
+        pgrx::error!(
+            "build.lists is too large: requested {}, but only {} are available.",
+            bottom_list,
+            alloc_size.len()
+        );
+    }
+    let mut priorities: BinaryHeap<PriorityItem> = alloc_size
+        .iter()
+        .enumerate()
+        .map(|(i, x)| PriorityItem {
+            index: i,
+            priority: *x as f64 / (alloc_lists[0] as f64),
+        })
+        .collect();
+    while diff > 0 {
+        let top = priorities.pop().unwrap();
+        alloc_lists[top.index] += 1;
+        priorities.push(PriorityItem {
+            index: top.index,
+            priority: alloc_size[top.index] as f64 / (alloc_lists[top.index] as f64),
+        });
+        diff -= 1;
+    }
+    pgrx::info!("bottom clustering: started");
+    let mut mid_children = vec![Vec::new(); mid_centroids.len()];
+    let mut bottom_centroids = vec![];
+    let mut bottom_children = vec![];
+    let mut offset = 0;
+    for (i, nlist) in alloc_lists.into_iter().enumerate() {
+        let sub_samples: Vec<Vec<f32>> = alloc[i].iter().map(|&j| samples[j].clone()).collect();
+        let sub_centroids = k_means::k_means(
+            internal_build.build_threads as _,
+            |_| {
+                pgrx::check_for_interrupts!();
+            },
+            nlist as usize,
+            vector_options.dims as _,
+            &sub_samples,
+            internal_build.spherical_centroids,
+            internal_build.kmeans_iterations as _,
+        );
+        k_means_report(i as u32 + 1);
+        bottom_children.extend(vec![Vec::new(); sub_centroids.len()]);
+        bottom_centroids.extend(sub_centroids.iter().cloned());
+        mid_children[i] = (offset..offset + sub_centroids.len() as u32).collect();
+        offset += sub_centroids.len() as u32;
+    }
+    pgrx::info!("bottom clustering: finished");
+    result.push(Structure {
+        centroids: bottom_centroids.clone(),
+        children: bottom_children,
+    });
+    if !drop_top {
+        let mid_len = mid_children.len();
+        result.push(Structure {
+            centroids: mid_centroids.clone(),
+            children: mid_children,
+        });
+        let top_centroids = k_means::k_means(
+            internal_build.build_threads as _,
+            |_| {
+                pgrx::check_for_interrupts!();
+            },
+            1,
+            vector_options.dims as _,
+            &mid_centroids,
+            internal_build.spherical_centroids,
+            internal_build.kmeans_iterations as _,
+        );
+        result.push(Structure {
+            centroids: top_centroids,
+            children: vec![(0..mid_len as u32).collect(); 1],
+        });
+    } else {
+        let bottom_len = bottom_centroids.len();
+        let top_centroids = k_means::k_means(
+            internal_build.build_threads as _,
+            |_| {
+                pgrx::check_for_interrupts!();
+            },
+            1,
+            vector_options.dims as _,
+            &bottom_centroids,
+            internal_build.spherical_centroids,
+            internal_build.kmeans_iterations as _,
+        );
+        result.push(Structure {
+            centroids: top_centroids,
+            children: vec![(0..bottom_len as u32).collect(); 1],
+        });
+    }
+    result
 }
 
 fn make_internal_build(

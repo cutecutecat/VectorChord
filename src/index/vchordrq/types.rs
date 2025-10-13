@@ -44,6 +44,10 @@ pub struct VchordrqInternalBuildOptions {
     #[serde(default = "VchordrqInternalBuildOptions::default_build_threads")]
     #[validate(range(min = 1, max = 255))]
     pub build_threads: u16,
+    #[serde(default = "VchordrqInternalBuildOptions::default_approximate")]
+    pub approximate: bool,
+    #[serde(default = "VchordrqInternalBuildOptions::default_approximate_reduction_dim")]
+    pub approximate_reduction_dim: u32,
 }
 
 impl VchordrqInternalBuildOptions {
@@ -71,6 +75,12 @@ impl VchordrqInternalBuildOptions {
     fn default_build_threads() -> u16 {
         1
     }
+    fn default_approximate() -> bool {
+        false
+    }
+    fn default_approximate_reduction_dim() -> u32 {
+        0
+    }
 }
 
 impl Default for VchordrqInternalBuildOptions {
@@ -81,6 +91,8 @@ impl Default for VchordrqInternalBuildOptions {
             sampling_factor: Self::default_sampling_factor(),
             kmeans_iterations: Self::default_kmeans_iterations(),
             build_threads: Self::default_build_threads(),
+            approximate: Self::default_approximate(),
+            approximate_reduction_dim: Self::default_approximate_reduction_dim(),
         }
     }
 }
